@@ -9,6 +9,7 @@ add_library(djcore_timing
     src/BeatTimeMap.cpp
     src/DeckTimingEngine.cpp
     src/SyncEngine.cpp
+    src/DebugState.cpp
 )
 
 target_include_directories(djcore_timing

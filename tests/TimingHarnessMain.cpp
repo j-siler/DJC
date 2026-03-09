@@ -3,6 +3,8 @@
 //
 // Deterministic math harness validating:
 // - BeatTimeMap inversion correctness
+// - Negative-time / negative-beat extrapolation correctness
+// - Extrapolation beyond the last marker
 // - DeckTimingEngine block advancement
 // - Quantized beat jumps landing on-grid
 // - Long-run drift behavior
@@ -13,16 +15,15 @@
 #include "djcore/BeatTimeMap.hpp"
 #include "djcore/DeckTimingEngine.hpp"
 #include "djcore/SyncEngine.hpp"
-#include "DjCoreDomainTypes.hpp"
-
-#include <iostream>
-#include <iomanip>
-#include <random>
-#include <string>
-#include <cmath>
-#include <vector>
-#include <stdexcept>
+#include "djcore/DebugState.hpp"
 #include <algorithm>
+#include <cmath>
+#include <iomanip>
+#include <iostream>
+#include <random>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 namespace {
 
@@ -37,7 +38,9 @@ constexpr double kEpsT = 1e-9;
 bool nearly_equal(double a, double b, double eps) { return std::abs(a - b) <= eps; }
 
 void fail_if(bool cond, const std::string& msg) {
-  if (cond) throw std::runtime_error(msg);
+  if (cond) {
+    throw std::runtime_error(msg);
+  }
 }
 
 djcore::BeatTimeMap make_constant_bpm_map(double bpm, double duration_seconds) {
@@ -111,9 +114,71 @@ TestResult test2_tempo_change_inversion() {
   return r;
 }
 
-TestResult test3_quantized_jump_lands_on_grid() {
+TestResult test3_negative_domain_constant_bpm() {
   TestResult r;
-  r.name = "T3 Quantized jump lands on-grid";
+  r.name = "T3 Negative-domain constant BPM";
+
+  try {
+    const auto map = make_constant_bpm_map(120.0, 60.0);
+
+    fail_if(!nearly_equal(map.time_to_beat(-0.5), -1.0, 1e-12), "t=-0.5s expected b=-1");
+    fail_if(!nearly_equal(map.time_to_beat(-2.0), -4.0, 1e-12), "t=-2.0s expected b=-4");
+    fail_if(!nearly_equal(map.beat_to_time(-1.0), -0.5, 1e-12), "b=-1 expected t=-0.5");
+    fail_if(!nearly_equal(map.beat_to_time(-4.0), -2.0, 1e-12), "b=-4 expected t=-2.0");
+    fail_if(!nearly_equal(map.instantaneous_bpm(-10.0), 120.0, 1e-12), "negative-time BPM mismatch");
+
+    std::mt19937_64                        rng(777777);
+    std::uniform_real_distribution<double> dist(-30.0, 60.0);
+    for (int i = 0; i < 30000; ++i) {
+      const double t  = dist(rng);
+      const double b  = map.time_to_beat(t);
+      const double t2 = map.beat_to_time(b);
+      fail_if(std::abs(t2 - t) > kEpsT, "invert time->beat->time exceeded eps across negative region");
+    }
+
+    r.pass = true;
+  } catch (const std::exception& e) {
+    r.pass    = false;
+    r.message = e.what();
+  }
+  return r;
+}
+
+TestResult test4_extrapolation_beyond_map_extents() {
+  TestResult r;
+  r.name = "T4 Extrapolation beyond map extents";
+
+  try {
+    const auto map = make_two_segment_map();
+
+    // Before first marker: first segment slope (120 BPM => 2 beats/sec)
+    fail_if(!nearly_equal(map.time_to_beat(-1.0), -2.0, 1e-12), "pre-first-marker time extrapolation mismatch");
+    fail_if(!nearly_equal(map.beat_to_time(-2.0), -1.0, 1e-12), "pre-first-marker beat extrapolation mismatch");
+
+    // After last marker: last segment slope (140 BPM => 7/3 beats/sec)
+    fail_if(!nearly_equal(map.time_to_beat(126.0), 274.0, 1e-12), "post-last-marker time extrapolation mismatch");
+    fail_if(!nearly_equal(map.beat_to_time(274.0), 126.0, 1e-12), "post-last-marker beat extrapolation mismatch");
+
+    std::mt19937_64                        rng(888888);
+    std::uniform_real_distribution<double> dist(-20.0, 150.0);
+    for (int i = 0; i < 50000; ++i) {
+      const double t  = dist(rng);
+      const double b  = map.time_to_beat(t);
+      const double t2 = map.beat_to_time(b);
+      fail_if(std::abs(t2 - t) > 5e-9, "invert time->beat->time exceeded eps across full extrapolated span");
+    }
+
+    r.pass = true;
+  } catch (const std::exception& e) {
+    r.pass    = false;
+    r.message = e.what();
+  }
+  return r;
+}
+
+TestResult test5_quantized_jump_lands_on_grid() {
+  TestResult r;
+  r.name = "T5 Quantized jump lands on-grid";
 
   try {
     const auto               map = make_constant_bpm_map(128.0, 180.0);
@@ -144,14 +209,16 @@ TestResult test3_quantized_jump_lands_on_grid() {
   return r;
 }
 
-TestResult test4_long_run_drift() {
+TestResult test6_long_run_drift() {
   TestResult r;
-  r.name = "T4 Long-run drift (1 hour simulated)";
+  r.name = "T6 Long-run drift (1 hour simulated)";
 
   try {
     const auto               map = make_two_segment_map();
     djcore::DeckTimingEngine eng;
     djcore::DeckTimingState  deck;
+    std::cout << "\nSample initial state dump:\n";
+    djcore::print_debug(std::cout, deck, map);
     deck.t_seconds = 0.0;
     deck.playing   = true;
 
@@ -175,6 +242,8 @@ TestResult test4_long_run_drift() {
     }
 
     r.pass = true;
+    std::cout << "\nSample final state dump:\n";
+    djcore::print_debug(std::cout, deck, map);
   } catch (const std::exception& e) {
     r.pass    = false;
     r.message = e.what();
@@ -182,9 +251,9 @@ TestResult test4_long_run_drift() {
   return r;
 }
 
-TestResult test5_two_deck_phase_convergence() {
+TestResult test7_two_deck_phase_convergence() {
   TestResult r;
-  r.name = "T5 Two-deck phase convergence";
+  r.name = "T7 Two-deck phase convergence";
 
   try {
     const auto                  map = make_constant_bpm_map(128.0, 300.0);
@@ -237,9 +306,11 @@ int main() {
   std::vector<TestResult> results;
   results.push_back(test1_constant_bpm_inversion());
   results.push_back(test2_tempo_change_inversion());
-  results.push_back(test3_quantized_jump_lands_on_grid());
-  results.push_back(test4_long_run_drift());
-  results.push_back(test5_two_deck_phase_convergence());
+  results.push_back(test3_negative_domain_constant_bpm());
+  results.push_back(test4_extrapolation_beyond_map_extents());
+  results.push_back(test5_quantized_jump_lands_on_grid());
+  results.push_back(test6_long_run_drift());
+  results.push_back(test7_two_deck_phase_convergence());
 
   bool all_pass = true;
 
@@ -252,6 +323,5 @@ int main() {
     std::cout << "\n";
     all_pass = all_pass && tr.pass;
   }
-
   return all_pass ? 0 : 1;
 }
