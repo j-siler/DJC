@@ -44,20 +44,13 @@ void load_track(Deck& deck, const Track& track) {
     const TrackTime initial_position = choose_initial_load_position(track);
 
     deck.loaded_track = LoadedTrackRef{track.track_id};
-
-    // A fresh load starts paused.
     deck.transport_state = TransportState::Paused;
-
-    // The deck's authoritative live position becomes the chosen initial load point.
     deck.p_track = initial_position;
 
-    // A new load invalidates old discontinuity-sensitive live state.
     clear_live_seek_and_preview_state(deck);
     clear_live_loop_state(deck);
     neutralize_transient_rate_modifiers(deck);
 
-    // First-pass policy:
-    // after load, Cue should have an immediately meaningful stored position.
     deck.cue.main_cue_track_time = initial_position;
 }
 
@@ -99,6 +92,18 @@ bool pause(Deck& deck) {
     deck.cue.preview_active = false;
     deck.transport_state = TransportState::Paused;
     return true;
+}
+
+bool toggle_play_pause(Deck& deck) {
+    if (!deck.loaded_track.has_value()) {
+        return false;
+    }
+
+    if (deck.transport_state == TransportState::Paused) {
+        return play(deck);
+    }
+
+    return pause(deck);
 }
 
 } // namespace djcore
